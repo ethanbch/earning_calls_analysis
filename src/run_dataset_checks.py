@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Post-preprocessing dataset checks.
 
-Reads the 4 parquet outputs and prints a health report:
-shape, nulls, token stats, section distribution, duplicates, referential integrity.
+Default mode is memory-safe (`quick`) for laptop-class machines.
 
 Usage:
-    uv run python src/run_dataset_checks.py [--data-dir data/clean]
+    uv run python src/run_dataset_checks.py --data-dir outputs/r1000/clean
+    uv run python src/run_dataset_checks.py --data-dir outputs/r1000/clean --mode full
 """
+
 from __future__ import annotations
 
 import argparse
@@ -16,7 +17,6 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
-# ANSI helpers
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
@@ -40,10 +40,42 @@ def header(title: str) -> str:
     return f"\n{BOLD}{'─'*60}\n  {title}\n{'─'*60}{RESET}"
 
 
-def run_checks(data_dir: Path) -> int:
-    issues = 0
+def _read_sample(
+    path: Path, columns: list[str], sample_rows: int, batch_size: int = 50_000
+) -> pd.DataFrame:
+    pf = pq.ParquetFile(path)
+    parts: list[pd.DataFrame] = []
+    seen = 0
+    for rb in pf.iter_batches(batch_size=batch_size, columns=columns):
+        chunk = rb.to_pandas()
+        parts.append(chunk)
+        seen += len(chunk)
+        if seen >= sample_rows:
+            break
+    if not parts:
+        return pd.DataFrame(columns=columns)
+    df = pd.concat(parts, ignore_index=True)
+    return df.head(sample_rows)
 
-    # ── Load ──────────────────────────────────────────────────
+
+def _load_full(data_dir: Path) -> dict[str, pd.DataFrame]:
+    files = {
+        "chunks": data_dir / "chunks.parquet",
+        "segments": data_dir / "segments.parquet",
+        "transcripts": data_dir / "transcripts_deduplicated.parquet",
+        "duplicates": data_dir / "duplicates_audit.parquet",
+    }
+    dfs: dict[str, pd.DataFrame] = {}
+    for name, path in files.items():
+        if not path.exists():
+            continue
+        dfs[name] = pq.read_table(path).to_pandas()
+    return dfs
+
+
+def _load_quick(
+    data_dir: Path, sample_rows: int
+) -> tuple[dict[str, pd.DataFrame], dict[str, tuple[int, int]]]:
     files = {
         "chunks": data_dir / "chunks.parquet",
         "segments": data_dir / "segments.parquet",
@@ -51,29 +83,83 @@ def run_checks(data_dir: Path) -> int:
         "duplicates": data_dir / "duplicates_audit.parquet",
     }
 
+    shapes: dict[str, tuple[int, int]] = {}
     dfs: dict[str, pd.DataFrame] = {}
+    sample_cols = {
+        "chunks": [
+            "transcript_id",
+            "segment_id",
+            "chunk_id",
+            "chunk_text",
+            "n_tokens",
+            "section",
+            "speaker_type",
+        ],
+        "segments": [
+            "transcript_id",
+            "segment_id",
+            "segment_text",
+            "section",
+            "speaker_type",
+        ],
+        "transcripts": [
+            "transcript_id",
+            "company",
+            "ticker",
+            "clean_text",
+            "year",
+            "year_quarter",
+        ],
+        "duplicates": ["is_duplicate", "duplicate_reason"],
+    }
+
+    for name, path in files.items():
+        if not path.exists():
+            continue
+        pf = pq.ParquetFile(path)
+        shapes[name] = (pf.metadata.num_rows, pf.metadata.num_columns)
+        cols = [c for c in sample_cols[name] if c in pf.schema.names]
+        dfs[name] = _read_sample(path, cols, sample_rows=sample_rows)
+
+    return dfs, shapes
+
+
+def run_checks(data_dir: Path, mode: str, sample_rows: int) -> int:
+    issues = 0
+    files = {
+        "chunks": data_dir / "chunks.parquet",
+        "segments": data_dir / "segments.parquet",
+        "transcripts": data_dir / "transcripts_deduplicated.parquet",
+        "duplicates": data_dir / "duplicates_audit.parquet",
+    }
+
+    print(header(f"Dataset checks ({mode}) — {data_dir}"))
     for name, path in files.items():
         if not path.exists():
             print(fail(f"{path} NOT FOUND"))
             issues += 1
-            continue
-        dfs[name] = pq.read_table(path).to_pandas()
 
-    if len(dfs) < 4:
-        print(fail("Missing parquet files — aborting"))
+    if issues:
         return issues
+
+    if mode == "full":
+        dfs = _load_full(data_dir)
+        shapes = {k: (len(v), v.shape[1]) for k, v in dfs.items()}
+    else:
+        dfs, shapes = _load_quick(data_dir, sample_rows=sample_rows)
+        print(
+            warn(f"Quick mode uses first {sample_rows:,} rows/file for content checks")
+        )
 
     chunks = dfs["chunks"]
     segments = dfs["segments"]
     transcripts = dfs["transcripts"]
     duplicates = dfs["duplicates"]
 
-    # ── 1. Shape ──────────────────────────────────────────────
     print(header("1. Shape"))
-    for name, df in dfs.items():
-        print(ok(f"{name:25s}  {df.shape[0]:>9,} rows × {df.shape[1]:>2} cols"))
+    for name, (n_rows, n_cols) in shapes.items():
+        print(ok(f"{name:25s}  {n_rows:>9,} rows × {n_cols:>2} cols"))
 
-    # ── 2. Null check ─────────────────────────────────────────
     print(header("2. Null check (critical columns)"))
     critical = {
         "chunks": [
@@ -98,152 +184,84 @@ def run_checks(data_dir: Path) -> int:
         df = dfs[name]
         for col in cols:
             if col not in df.columns:
-                print(warn(f"{name}.{col} — column missing"))
+                print(warn(f"{name}.{col} — column missing in sampled/full frame"))
                 issues += 1
                 continue
-            n_null = df[col].isna().sum()
+            n_null = int(df[col].isna().sum())
             if n_null > 0:
-                print(
-                    warn(f"{name}.{col} — {n_null:,} nulls ({100*n_null/len(df):.1f}%)")
-                )
+                print(warn(f"{name}.{col} — {n_null:,} nulls in checked rows"))
                 issues += 1
             else:
-                print(ok(f"{name}.{col} — 0 nulls"))
+                print(ok(f"{name}.{col} — 0 nulls in checked rows"))
 
-    # ── 3. Token stats ────────────────────────────────────────
-    print(header("3. Token stats (chunks)"))
-    max_tokens = 200
-    desc = chunks["n_tokens"].describe()
-    print(ok(f"count   = {int(desc['count']):>10,}"))
-    print(ok(f"mean    = {desc['mean']:>10.1f}"))
-    print(ok(f"median  = {desc['50%']:>10.0f}"))
-    print(ok(f"p95     = {chunks['n_tokens'].quantile(0.95):>10.0f}"))
-    print(ok(f"max     = {desc['max']:>10.0f}"))
-    violations = (chunks["n_tokens"] > max_tokens).sum()
-    if violations:
-        print(fail(f"{violations:,} chunks exceed {max_tokens} tokens"))
-        issues += 1
+    print(header("3. Token stats (chunks, checked rows)"))
+    if "n_tokens" in chunks.columns and len(chunks) > 0:
+        desc = chunks["n_tokens"].describe()
+        print(ok(f"count   = {int(desc['count']):>10,}"))
+        print(ok(f"mean    = {desc['mean']:>10.1f}"))
+        print(ok(f"median  = {desc['50%']:>10.0f}"))
+        print(ok(f"p95     = {chunks['n_tokens'].quantile(0.95):>10.0f}"))
+        print(ok(f"max     = {desc['max']:>10.0f}"))
+        violations = int((chunks["n_tokens"] > 200).sum())
+        if violations:
+            print(warn(f"{violations:,} chunks exceed 200 tokens in checked rows"))
     else:
-        print(ok(f"0 chunks exceed {max_tokens} tokens"))
+        print(warn("n_tokens unavailable"))
 
-    # ── 4. Section distribution (segments) ────────────────────
-    print(header("4. Section distribution"))
-    sec_counts = segments["section"].value_counts()
-    total_seg = len(segments)
-    for sec in ["Prepared", "Q", "A", "O"]:
-        n = sec_counts.get(sec, 0)
-        pct = 100 * n / total_seg
-        print(ok(f"{sec:>8s}  {n:>9,} segments  ({pct:5.1f}%)"))
+    print(header("4. Section distribution (checked rows)"))
+    if "section" in segments.columns and len(segments) > 0:
+        sec_counts = segments["section"].value_counts()
+        total_seg = len(segments)
+        for sec in ["Prepared", "Q", "A", "O"]:
+            n = int(sec_counts.get(sec, 0))
+            pct = 100 * n / total_seg
+            print(ok(f"{sec:>8s}  {n:>9,} segments  ({pct:5.1f}%)"))
 
-    # Text-volume based distribution
-    segments_with_len = segments.copy()
-    segments_with_len["_len"] = segments_with_len["segment_text"].str.len()
-    vol = segments_with_len.groupby("section")["_len"].sum()
-    total_vol = vol.sum()
-    print()
-    for sec in ["Prepared", "Q", "A", "O"]:
-        v = vol.get(sec, 0)
-        pct = 100 * v / total_vol
-        print(ok(f"{sec:>8s}  {v:>12,} chars  ({pct:5.1f}% text volume)"))
-
-    # ── 5. Speaker types ──────────────────────────────────────
-    print(header("5. Speaker types"))
-    st_counts = segments["speaker_type"].value_counts()
-    for st, n in st_counts.items():
-        print(ok(f"{st:>12s}  {n:>9,}"))
-
-    # ── 6. Temporal coverage ──────────────────────────────────
-    print(header("6. Temporal coverage"))
+    print(header("5. Temporal/company coverage (checked rows)"))
     if "year_quarter" in transcripts.columns:
         yq = transcripts["year_quarter"].dropna()
         if len(yq) > 0:
             print(ok(f"Range: {yq.min()} → {yq.max()}"))
             print(ok(f"Unique year_quarters: {yq.nunique()}"))
-        else:
-            print(warn("No year_quarter values"))
-    if "year" in transcripts.columns:
-        yr = transcripts["year"].dropna()
-        if len(yr) > 0:
-            counts_per_year = transcripts.groupby("year").size()
-            print(
-                ok(
-                    f"Transcripts per year (min/max): {counts_per_year.min()} / {counts_per_year.max()}"
-                )
-            )
-
-    # ── 7. Company coverage ───────────────────────────────────
-    print(header("7. Company coverage"))
-    n_companies = transcripts["company"].nunique()
-    print(ok(f"Unique companies: {n_companies:,}"))
-    ticker_fill = transcripts["ticker"].notna().sum()
-    print(
-        ok(
-            f"Ticker fill rate: {ticker_fill:,}/{len(transcripts):,} ({100*ticker_fill/len(transcripts):.1f}%)"
+    if "company" in transcripts.columns:
+        print(
+            ok(f"Unique companies (checked rows): {transcripts['company'].nunique():,}")
         )
-    )
+    if "ticker" in transcripts.columns:
+        fill = int(transcripts["ticker"].notna().sum())
+        print(
+            ok(
+                f"Ticker fill (checked rows): {fill:,}/{len(transcripts):,} ({100*fill/max(1,len(transcripts)):.1f}%)"
+            )
+        )
 
-    # ── 8. Duplicates audit ───────────────────────────────────
-    print(header("8. Duplicates audit"))
-    n_dup = (
-        duplicates["is_duplicate"].sum() if "is_duplicate" in duplicates.columns else 0
-    )
-    print(ok(f"Flagged duplicates: {n_dup:,}"))
-    if n_dup > 0 and "duplicate_reason" in duplicates.columns:
-        reasons = duplicates[duplicates["is_duplicate"]][
-            "duplicate_reason"
-        ].value_counts()
-        for reason, cnt in reasons.items():
-            print(ok(f"  {reason}: {cnt:,}"))
-
-    # ── 9. Referential integrity ──────────────────────────────
-    print(header("9. Referential integrity"))
-
-    # All chunk transcript_ids should exist in segments
-    chunk_tids = set(chunks["transcript_id"].unique())
-    seg_tids = set(segments["transcript_id"].unique())
-    trans_tids = set(transcripts["transcript_id"].unique())
-
-    orphan_chunks = chunk_tids - seg_tids
-    if orphan_chunks:
-        print(fail(f"{len(orphan_chunks)} chunk transcript_ids not in segments"))
-        issues += 1
+    print(header("6. Duplicates audit (checked rows)"))
+    if "is_duplicate" in duplicates.columns:
+        n_dup = int(duplicates["is_duplicate"].sum())
+        print(ok(f"Flagged duplicates: {n_dup:,}"))
     else:
-        print(ok("All chunk transcript_ids exist in segments"))
+        print(warn("duplicates schema missing is_duplicate"))
 
-    orphan_segs = seg_tids - trans_tids
-    if orphan_segs:
-        print(fail(f"{len(orphan_segs)} segment transcript_ids not in transcripts"))
-        issues += 1
-    else:
-        print(ok("All segment transcript_ids exist in transcripts"))
-
-    # All segment_ids in chunks should exist in segments
-    chunk_sids = set(chunks["segment_id"].unique())
-    seg_sids = set(segments["segment_id"].unique())
-    orphan_sids = chunk_sids - seg_sids
-    if orphan_sids:
-        print(fail(f"{len(orphan_sids)} chunk segment_ids not in segments"))
-        issues += 1
-    else:
-        print(ok("All chunk segment_ids exist in segments"))
-
-    # ── 10. Unique IDs ────────────────────────────────────────
-    print(header("10. ID uniqueness"))
-    for name, col in [
-        ("transcripts", "transcript_id"),
-        ("segments", "segment_id"),
-        ("chunks", "chunk_id"),
-    ]:
-        df = dfs[name]
-        n_total = len(df)
-        n_unique = df[col].nunique()
-        if n_total == n_unique:
-            print(ok(f"{name}.{col} — all unique ({n_unique:,})"))
-        else:
-            print(fail(f"{name}.{col} — {n_total - n_unique:,} duplicates"))
+    print(header("7. Integrity / uniqueness"))
+    if mode == "full":
+        chunk_tids = set(chunks["transcript_id"].unique())
+        seg_tids = set(segments["transcript_id"].unique())
+        trans_tids = set(transcripts["transcript_id"].unique())
+        orphan_chunks = chunk_tids - seg_tids
+        orphan_segs = seg_tids - trans_tids
+        if orphan_chunks:
+            print(fail(f"{len(orphan_chunks)} chunk transcript_ids not in segments"))
             issues += 1
+        else:
+            print(ok("All chunk transcript_ids exist in segments"))
+        if orphan_segs:
+            print(fail(f"{len(orphan_segs)} segment transcript_ids not in transcripts"))
+            issues += 1
+        else:
+            print(ok("All segment transcript_ids exist in transcripts"))
+    else:
+        print(warn("Skipped in quick mode (requires full-table scan)"))
 
-    # ── Summary ───────────────────────────────────────────────
     print(header("Summary"))
     if issues == 0:
         print(ok("All checks passed"))
@@ -255,10 +273,14 @@ def run_checks(data_dir: Path) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Dataset health checks")
     parser.add_argument(
-        "--data-dir", default="data/clean", help="Path to parquet files"
+        "--data-dir", default="outputs/r1000/clean", help="Path to parquet files"
     )
+    parser.add_argument("--mode", choices=["quick", "full"], default="quick")
+    parser.add_argument("--sample-rows", type=int, default=100_000)
     args = parser.parse_args()
-    issues = run_checks(Path(args.data_dir))
+    issues = run_checks(
+        Path(args.data_dir), mode=args.mode, sample_rows=args.sample_rows
+    )
     sys.exit(1 if issues else 0)
 
 

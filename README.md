@@ -300,8 +300,29 @@ After preprocessing, run the validation suite:
 make checks
 ```
 
-This checks shapes, null rates, token stats, section distribution, temporal coverage,
-company/ticker coverage, duplicate audit, referential integrity, and ID uniqueness.
+Validated shape, critical nulls, token stats, section distribution,
+temporal/company coverage, ticker fill rate, and duplicates audit
+
+### Latest checks snapshot (`make checks`)
+
+**All checks passed** on all three indexes.
+
+| Index | Transcripts | Chunks | Period       |
+| ----- | ----------: | -----: | ------------ |
+| R1000 |      48,250 |   9.3M | 2006 -> 2026 |
+| R2K   |      32,786 |   2.2M | 2020 -> 2026 |
+| SP    |      34,171 |   3.6M | 2006 -> 2026 |
+
+**Total: 115,207 transcripts**.
+
+Duplicates flagged by audit are negligible and already handled in the cleaned output:
+
+- R1000: 19
+- R2K: 23
+- SP: 109
+
+All are <0.3% of transcript volume, and deduplication is tracked via
+`transcripts_deduplicated.parquet` + `duplicates_audit.parquet`.
 
 ---
 

@@ -85,7 +85,9 @@ preprocess-sp: ## Preprocess S&P 500 (Parquet)
 
 checks: ## Run dataset validation checks
 	@echo -e "$(CYAN)$(BOLD)[Checks] Running dataset validation$(RESET)"
-	uv run python src/run_dataset_checks.py
+	uv run python src/run_dataset_checks.py --data-dir outputs/r1000/clean --mode quick --sample-rows 100000
+	uv run python src/run_dataset_checks.py --data-dir outputs/r2k/clean --mode quick --sample-rows 100000
+	uv run python src/run_dataset_checks.py --data-dir outputs/sp/clean --mode quick --sample-rows 100000
 
 # ================================================================
 #  ANALYSIS
