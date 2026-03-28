@@ -1,7 +1,17 @@
-playwright>=1.52.0,<2.0.0
-selenium>=4.28.0,<5.0.0
-httpx>=0.28.0,<1.0.0
-python-dotenv>=1.0.1,<2.0.0
+# Core data processing
 pandas>=2.2.2,<3.0.0
+numpy>=1.24.0,<2.0.0
+
+# I/O & formats
 pyarrow>=16.1.0,<20.0.0
-pytest>=8.2.0,<9.0.0
+
+# Progress bars / utilities
+tqdm>=4.64.0,<5.0.0
+
+# Plots used in validation reports
+matplotlib>=3.5.0,<4.0.0
+
+# Optional (only needed if you enable NLP normalization or tokenizer fallback):
+nltk>=3.8.0
+transformers>=4.30.0
+pytorch>=2.0.0,<3.0.0

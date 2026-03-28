@@ -1,295 +1,265 @@
-"""Run descriptive sanity checks on cleaned earnings call datasets."""
+#!/usr/bin/env python3
+"""Post-preprocessing dataset checks.
 
+Reads the 4 parquet outputs and prints a health report:
+shape, nulls, token stats, section distribution, duplicates, referential integrity.
+
+Usage:
+    uv run python src/run_dataset_checks.py [--data-dir data/clean]
+"""
 from __future__ import annotations
 
 import argparse
-import json
-import logging
+import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
+
+# ANSI helpers
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+BOLD = "\033[1m"
+RESET = "\033[0m"
 
 
-def setup_logger(log_file: Path) -> logging.Logger:
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("dataset_checks")
-    logger.setLevel(logging.INFO)
-    logger.handlers = []
-    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-
-    sh = logging.StreamHandler()
-    sh.setFormatter(formatter)
-    logger.addHandler(sh)
-    return logger
+def ok(msg: str) -> str:
+    return f"  {GREEN}✓{RESET} {msg}"
 
 
-def read_table(path: Path, logger: logging.Logger) -> pd.DataFrame:
-    csv_path = path.with_suffix(".csv")
-    if csv_path.exists():
-        df = pd.read_csv(csv_path, low_memory=False)
-        logger.info("Loaded CSV %s with shape=%s", csv_path, df.shape)
-        return df
-    if path.exists():
-        try:
-            df = pd.read_parquet(path)
-            logger.info("Loaded Parquet %s with shape=%s", path, df.shape)
-            return df
-        except Exception as e:
-            logger.warning("Could not read parquet %s (%s).", path, e)
-    logger.warning("Missing table: %s", path)
-    return pd.DataFrame()
+def warn(msg: str) -> str:
+    return f"  {YELLOW}⚠{RESET} {msg}"
 
 
-def save_plot_bar(df: pd.DataFrame, x: str, y: str, title: str, out_path: Path, top_n: int = 25) -> None:
-    if df.empty:
-        return
-    plot_df = df.head(top_n)
-    plt.figure(figsize=(10, 5))
-    plt.bar(plot_df[x].astype(str), plot_df[y])
-    plt.xticks(rotation=75, ha="right")
-    plt.title(title)
-    plt.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=150)
-    plt.close()
+def fail(msg: str) -> str:
+    return f"  {RED}✗{RESET} {msg}"
 
 
-def quarter_sort_key(yq: str) -> Tuple[int, int]:
-    if not isinstance(yq, str) or "Q" not in yq:
-        return (9999, 9)
-    y, q = yq.split("Q")
-    return (int(y), int(q))
+def header(title: str) -> str:
+    return f"\n{BOLD}{'─'*60}\n  {title}\n{'─'*60}{RESET}"
 
 
-def full_quarter_range(min_yq: str, max_yq: str) -> List[str]:
-    y1, q1 = quarter_sort_key(min_yq)
-    y2, q2 = quarter_sort_key(max_yq)
-    if y1 == 9999 or y2 == 9999:
-        return []
-    out: List[str] = []
-    y, q = y1, q1
-    while (y < y2) or (y == y2 and q <= q2):
-        out.append(f"{y}Q{q}")
-        q += 1
-        if q > 4:
-            q = 1
-            y += 1
-    return out
+def run_checks(data_dir: Path) -> int:
+    issues = 0
 
+    # ── Load ──────────────────────────────────────────────────
+    files = {
+        "chunks": data_dir / "chunks.parquet",
+        "segments": data_dir / "segments.parquet",
+        "transcripts": data_dir / "transcripts_deduplicated.parquet",
+        "duplicates": data_dir / "duplicates_audit.parquet",
+    }
 
-def run_checks(output_dir: Path) -> None:
-    checks_dir = output_dir / "checks"
-    clean_dir = output_dir / "clean"
-    logger = setup_logger(Path("logs") / "checks.log")
-    checks_dir.mkdir(parents=True, exist_ok=True)
+    dfs: dict[str, pd.DataFrame] = {}
+    for name, path in files.items():
+        if not path.exists():
+            print(fail(f"{path} NOT FOUND"))
+            issues += 1
+            continue
+        dfs[name] = pq.read_table(path).to_pandas()
 
-    transcripts = read_table(clean_dir / "transcripts_deduplicated.parquet", logger)
-    segments = read_table(clean_dir / "segments.parquet", logger)
-    chunks = read_table(clean_dir / "chunks.parquet", logger)
+    if len(dfs) < 4:
+        print(fail("Missing parquet files — aborting"))
+        return issues
 
-    if transcripts.empty:
-        logger.error("No transcripts dataset found. Exiting checks.")
-        return
+    chunks = dfs["chunks"]
+    segments = dfs["segments"]
+    transcripts = dfs["transcripts"]
+    duplicates = dfs["duplicates"]
 
-    # 1) Earnings calls per quarter
-    ec_per_quarter = (
-        transcripts.dropna(subset=["year_quarter"]).groupby("year_quarter")["transcript_id"].nunique().reset_index(name="n_earnings_calls")
+    # ── 1. Shape ──────────────────────────────────────────────
+    print(header("1. Shape"))
+    for name, df in dfs.items():
+        print(ok(f"{name:25s}  {df.shape[0]:>9,} rows × {df.shape[1]:>2} cols"))
+
+    # ── 2. Null check ─────────────────────────────────────────
+    print(header("2. Null check (critical columns)"))
+    critical = {
+        "chunks": [
+            "transcript_id",
+            "segment_id",
+            "chunk_id",
+            "chunk_text",
+            "n_tokens",
+            "section",
+            "speaker_type",
+        ],
+        "segments": [
+            "transcript_id",
+            "segment_id",
+            "segment_text",
+            "section",
+            "speaker_type",
+        ],
+        "transcripts": ["transcript_id", "company", "clean_text"],
+    }
+    for name, cols in critical.items():
+        df = dfs[name]
+        for col in cols:
+            if col not in df.columns:
+                print(warn(f"{name}.{col} — column missing"))
+                issues += 1
+                continue
+            n_null = df[col].isna().sum()
+            if n_null > 0:
+                print(
+                    warn(f"{name}.{col} — {n_null:,} nulls ({100*n_null/len(df):.1f}%)")
+                )
+                issues += 1
+            else:
+                print(ok(f"{name}.{col} — 0 nulls"))
+
+    # ── 3. Token stats ────────────────────────────────────────
+    print(header("3. Token stats (chunks)"))
+    max_tokens = 200
+    desc = chunks["n_tokens"].describe()
+    print(ok(f"count   = {int(desc['count']):>10,}"))
+    print(ok(f"mean    = {desc['mean']:>10.1f}"))
+    print(ok(f"median  = {desc['50%']:>10.0f}"))
+    print(ok(f"p95     = {chunks['n_tokens'].quantile(0.95):>10.0f}"))
+    print(ok(f"max     = {desc['max']:>10.0f}"))
+    violations = (chunks["n_tokens"] > max_tokens).sum()
+    if violations:
+        print(fail(f"{violations:,} chunks exceed {max_tokens} tokens"))
+        issues += 1
+    else:
+        print(ok(f"0 chunks exceed {max_tokens} tokens"))
+
+    # ── 4. Section distribution (segments) ────────────────────
+    print(header("4. Section distribution"))
+    sec_counts = segments["section"].value_counts()
+    total_seg = len(segments)
+    for sec in ["Prepared", "Q", "A", "O"]:
+        n = sec_counts.get(sec, 0)
+        pct = 100 * n / total_seg
+        print(ok(f"{sec:>8s}  {n:>9,} segments  ({pct:5.1f}%)"))
+
+    # Text-volume based distribution
+    segments_with_len = segments.copy()
+    segments_with_len["_len"] = segments_with_len["segment_text"].str.len()
+    vol = segments_with_len.groupby("section")["_len"].sum()
+    total_vol = vol.sum()
+    print()
+    for sec in ["Prepared", "Q", "A", "O"]:
+        v = vol.get(sec, 0)
+        pct = 100 * v / total_vol
+        print(ok(f"{sec:>8s}  {v:>12,} chars  ({pct:5.1f}% text volume)"))
+
+    # ── 5. Speaker types ──────────────────────────────────────
+    print(header("5. Speaker types"))
+    st_counts = segments["speaker_type"].value_counts()
+    for st, n in st_counts.items():
+        print(ok(f"{st:>12s}  {n:>9,}"))
+
+    # ── 6. Temporal coverage ──────────────────────────────────
+    print(header("6. Temporal coverage"))
+    if "year_quarter" in transcripts.columns:
+        yq = transcripts["year_quarter"].dropna()
+        if len(yq) > 0:
+            print(ok(f"Range: {yq.min()} → {yq.max()}"))
+            print(ok(f"Unique year_quarters: {yq.nunique()}"))
+        else:
+            print(warn("No year_quarter values"))
+    if "year" in transcripts.columns:
+        yr = transcripts["year"].dropna()
+        if len(yr) > 0:
+            counts_per_year = transcripts.groupby("year").size()
+            print(
+                ok(
+                    f"Transcripts per year (min/max): {counts_per_year.min()} / {counts_per_year.max()}"
+                )
+            )
+
+    # ── 7. Company coverage ───────────────────────────────────
+    print(header("7. Company coverage"))
+    n_companies = transcripts["company"].nunique()
+    print(ok(f"Unique companies: {n_companies:,}"))
+    ticker_fill = transcripts["ticker"].notna().sum()
+    print(
+        ok(
+            f"Ticker fill rate: {ticker_fill:,}/{len(transcripts):,} ({100*ticker_fill/len(transcripts):.1f}%)"
+        )
     )
-    ec_per_quarter = ec_per_quarter.sort_values("year_quarter", key=lambda s: s.map(quarter_sort_key))
-    ec_per_quarter.to_csv(checks_dir / "ec_per_quarter.csv", index=False)
-    save_plot_bar(ec_per_quarter, "year_quarter", "n_earnings_calls", "Earnings Calls per Quarter", checks_dir / "ec_per_quarter.png", top_n=len(ec_per_quarter))
 
-    # 2) Average calls per company stats
-    calls_per_company = transcripts.groupby("company")["transcript_id"].nunique().rename("n_calls").reset_index()
-    calls_per_company = calls_per_company.sort_values("n_calls", ascending=False)
-    calls_per_company.to_csv(checks_dir / "calls_per_company.csv", index=False)
+    # ── 8. Duplicates audit ───────────────────────────────────
+    print(header("8. Duplicates audit"))
+    n_dup = (
+        duplicates["is_duplicate"].sum() if "is_duplicate" in duplicates.columns else 0
+    )
+    print(ok(f"Flagged duplicates: {n_dup:,}"))
+    if n_dup > 0 and "duplicate_reason" in duplicates.columns:
+        reasons = duplicates[duplicates["is_duplicate"]][
+            "duplicate_reason"
+        ].value_counts()
+        for reason, cnt in reasons.items():
+            print(ok(f"  {reason}: {cnt:,}"))
 
-    avg_stats = {
-        "mean": float(calls_per_company["n_calls"].mean()) if not calls_per_company.empty else 0.0,
-        "median": float(calls_per_company["n_calls"].median()) if not calls_per_company.empty else 0.0,
-        "p25": float(calls_per_company["n_calls"].quantile(0.25)) if not calls_per_company.empty else 0.0,
-        "p75": float(calls_per_company["n_calls"].quantile(0.75)) if not calls_per_company.empty else 0.0,
-        "max": int(calls_per_company["n_calls"].max()) if not calls_per_company.empty else 0,
-    }
-    with (checks_dir / "avg_calls_per_company_summary.json").open("w", encoding="utf-8") as f:
-        json.dump(avg_stats, f, indent=2)
+    # ── 9. Referential integrity ──────────────────────────────
+    print(header("9. Referential integrity"))
 
-    # 3) Companies present in every quarter
-    yq_values = sorted(transcripts["year_quarter"].dropna().unique(), key=quarter_sort_key)
-    if yq_values:
-        full_range = full_quarter_range(yq_values[0], yq_values[-1])
+    # All chunk transcript_ids should exist in segments
+    chunk_tids = set(chunks["transcript_id"].unique())
+    seg_tids = set(segments["transcript_id"].unique())
+    trans_tids = set(transcripts["transcript_id"].unique())
+
+    orphan_chunks = chunk_tids - seg_tids
+    if orphan_chunks:
+        print(fail(f"{len(orphan_chunks)} chunk transcript_ids not in segments"))
+        issues += 1
     else:
-        full_range = []
+        print(ok("All chunk transcript_ids exist in segments"))
 
-    presence = transcripts.dropna(subset=["company", "year_quarter"]).groupby("company")["year_quarter"].apply(lambda s: set(s)).reset_index(name="quarters")
-    in_all = presence[presence["quarters"].apply(lambda qs: set(full_range).issubset(qs))].copy()
-    in_all_companies = in_all[["company"]].sort_values("company")
-    in_all_companies.to_csv(checks_dir / "companies_in_every_quarter.csv", index=False)
-    with (checks_dir / "companies_in_every_quarter_summary.json").open("w", encoding="utf-8") as f:
-        json.dump({"count": int(len(in_all_companies)), "min_quarter": yq_values[0] if yq_values else None, "max_quarter": yq_values[-1] if yq_values else None}, f, indent=2)
-
-    # 4) Most cited executives
-    if not segments.empty:
-        exec_df = segments[(segments["speaker_type"] == "Executive") & segments["speaker_name_normalized"].notna()].copy()
-        top_exec_segments = exec_df.groupby("speaker_name_normalized").size().reset_index(name="n_segments").sort_values("n_segments", ascending=False).head(25)
-        top_exec_calls = exec_df.groupby("speaker_name_normalized")["transcript_id"].nunique().reset_index(name="n_distinct_calls").sort_values("n_distinct_calls", ascending=False).head(25)
+    orphan_segs = seg_tids - trans_tids
+    if orphan_segs:
+        print(fail(f"{len(orphan_segs)} segment transcript_ids not in transcripts"))
+        issues += 1
     else:
-        top_exec_segments = pd.DataFrame(columns=["speaker_name_normalized", "n_segments"])
-        top_exec_calls = pd.DataFrame(columns=["speaker_name_normalized", "n_distinct_calls"])
+        print(ok("All segment transcript_ids exist in transcripts"))
 
-    top_exec_segments.to_csv(checks_dir / "top_executives_by_segments.csv", index=False)
-    top_exec_calls.to_csv(checks_dir / "top_executives_by_distinct_calls.csv", index=False)
-    save_plot_bar(top_exec_segments, "speaker_name_normalized", "n_segments", "Top Executives by Segments", checks_dir / "top_executives_by_segments.png")
-    save_plot_bar(top_exec_calls, "speaker_name_normalized", "n_distinct_calls", "Top Executives by Distinct Calls", checks_dir / "top_executives_by_distinct_calls.png")
-
-    # 5) Most cited analysts
-    if not segments.empty:
-        an_df = segments[(segments["speaker_type"] == "Analyst") & (segments["section"] == "Q") & segments["speaker_name_normalized"].notna()].copy()
-        top_analyst_segments = an_df.groupby("speaker_name_normalized").size().reset_index(name="n_question_segments").sort_values("n_question_segments", ascending=False).head(25)
-        top_analyst_calls = an_df.groupby("speaker_name_normalized")["transcript_id"].nunique().reset_index(name="n_distinct_calls").sort_values("n_distinct_calls", ascending=False).head(25)
+    # All segment_ids in chunks should exist in segments
+    chunk_sids = set(chunks["segment_id"].unique())
+    seg_sids = set(segments["segment_id"].unique())
+    orphan_sids = chunk_sids - seg_sids
+    if orphan_sids:
+        print(fail(f"{len(orphan_sids)} chunk segment_ids not in segments"))
+        issues += 1
     else:
-        top_analyst_segments = pd.DataFrame(columns=["speaker_name_normalized", "n_question_segments"])
-        top_analyst_calls = pd.DataFrame(columns=["speaker_name_normalized", "n_distinct_calls"])
+        print(ok("All chunk segment_ids exist in segments"))
 
-    top_analyst_segments.to_csv(checks_dir / "top_analysts_by_question_segments.csv", index=False)
-    top_analyst_calls.to_csv(checks_dir / "top_analysts_by_distinct_calls.csv", index=False)
-    save_plot_bar(top_analyst_segments, "speaker_name_normalized", "n_question_segments", "Top Analysts by Q Segments", checks_dir / "top_analysts_by_question_segments.png")
-    save_plot_bar(top_analyst_calls, "speaker_name_normalized", "n_distinct_calls", "Top Analysts by Distinct Calls", checks_dir / "top_analysts_by_distinct_calls.png")
+    # ── 10. Unique IDs ────────────────────────────────────────
+    print(header("10. ID uniqueness"))
+    for name, col in [
+        ("transcripts", "transcript_id"),
+        ("segments", "segment_id"),
+        ("chunks", "chunk_id"),
+    ]:
+        df = dfs[name]
+        n_total = len(df)
+        n_unique = df[col].nunique()
+        if n_total == n_unique:
+            print(ok(f"{name}.{col} — all unique ({n_unique:,})"))
+        else:
+            print(fail(f"{name}.{col} — {n_total - n_unique:,} duplicates"))
+            issues += 1
 
-    # 6) Top companies by number of calls
-    top_companies = calls_per_company.head(25)
-    top_companies.to_csv(checks_dir / "top_companies_by_calls.csv", index=False)
-    save_plot_bar(top_companies, "company", "n_calls", "Top Companies by Number of Calls", checks_dir / "top_companies_by_calls.png")
-
-    # 7) Distribution of calls per company
-    if not calls_per_company.empty:
-        plt.figure(figsize=(8, 4))
-        plt.hist(calls_per_company["n_calls"], bins=30)
-        plt.title("Distribution of Calls per Company")
-        plt.tight_layout()
-        plt.savefig(checks_dir / "calls_per_company_distribution.png", dpi=150)
-        plt.close()
-
-    # 8) Share of transcripts with both Q and A detected
-    if not segments.empty:
-        qa_flags = segments.groupby("transcript_id")["section"].agg(lambda s: ("Q" in set(s)) and ("A" in set(s)))
-        share_both_qa = float(qa_flags.mean())
+    # ── Summary ───────────────────────────────────────────────
+    print(header("Summary"))
+    if issues == 0:
+        print(ok("All checks passed"))
     else:
-        share_both_qa = 0.0
-
-    # 9) Ratio of Q to A segments per transcript and overall
-    if not segments.empty:
-        q_counts = segments[segments["section"] == "Q"].groupby("transcript_id").size().rename("q_segments")
-        a_counts = segments[segments["section"] == "A"].groupby("transcript_id").size().rename("a_segments")
-        qa_ratio = pd.concat([q_counts, a_counts], axis=1).fillna(0).reset_index()
-        qa_ratio["q_to_a_ratio"] = np.where(qa_ratio["a_segments"] > 0, qa_ratio["q_segments"] / qa_ratio["a_segments"], np.nan)
-        qa_ratio.to_csv(checks_dir / "qa_ratio_per_transcript.csv", index=False)
-        overall_ratio = float(q_counts.sum() / a_counts.sum()) if a_counts.sum() > 0 else None
-    else:
-        qa_ratio = pd.DataFrame(columns=["transcript_id", "q_segments", "a_segments", "q_to_a_ratio"])
-        qa_ratio.to_csv(checks_dir / "qa_ratio_per_transcript.csv", index=False)
-        overall_ratio = None
-
-    # 10) Segment count per transcript
-    if not segments.empty:
-        seg_count = segments.groupby("transcript_id").size().reset_index(name="n_segments")
-    else:
-        seg_count = pd.DataFrame(columns=["transcript_id", "n_segments"])
-    seg_count.to_csv(checks_dir / "segment_count_per_transcript.csv", index=False)
-
-    # 11) Chunk count per transcript
-    if not chunks.empty:
-        chunk_count = chunks.groupby("transcript_id").size().reset_index(name="n_chunks")
-    else:
-        chunk_count = pd.DataFrame(columns=["transcript_id", "n_chunks"])
-    chunk_count.to_csv(checks_dir / "chunk_count_per_transcript.csv", index=False)
-
-    # 12) Most common missing metadata fields
-    metadata_fields = ["company", "ticker", "event_date", "year", "quarter", "year_quarter", "title"]
-    miss = pd.DataFrame({
-        "field": metadata_fields,
-        "missing_count": [int(transcripts[c].isna().sum()) if c in transcripts.columns else int(len(transcripts)) for c in metadata_fields],
-    }).sort_values("missing_count", ascending=False)
-    miss.to_csv(checks_dir / "missing_metadata_fields.csv", index=False)
-
-    # 13) Coverage table + heatmap (top 50 companies)
-    cov = transcripts.dropna(subset=["company", "year_quarter"]).groupby(["company", "year_quarter"]).size().unstack(fill_value=0)
-    cov.to_csv(checks_dir / "company_quarter_coverage_table.csv")
-    if not cov.empty:
-        top50 = cov.sum(axis=1).sort_values(ascending=False).head(50).index
-        cov_plot = cov.loc[top50]
-        plt.figure(figsize=(12, 10))
-        plt.imshow(cov_plot.values > 0, aspect="auto", interpolation="nearest")
-        plt.yticks(range(len(cov_plot.index)), cov_plot.index)
-        plt.xticks(range(len(cov_plot.columns)), cov_plot.columns, rotation=90)
-        plt.title("Company x Quarter Coverage (Top 50 Companies)")
-        plt.tight_layout()
-        plt.savefig(checks_dir / "company_quarter_coverage_heatmap.png", dpi=150)
-        plt.close()
-
-    # 14) Top speaker names raw vs normalized
-    if not segments.empty:
-        top_raw = segments["speaker_name_raw"].fillna("").value_counts().head(50).rename_axis("speaker_name_raw").reset_index(name="count")
-        top_norm = segments["speaker_name_normalized"].fillna("").value_counts().head(50).rename_axis("speaker_name_normalized").reset_index(name="count")
-    else:
-        top_raw = pd.DataFrame(columns=["speaker_name_raw", "count"])
-        top_norm = pd.DataFrame(columns=["speaker_name_normalized", "count"])
-    top_raw.to_csv(checks_dir / "top_speaker_names_raw.csv", index=False)
-    top_norm.to_csv(checks_dir / "top_speaker_names_normalized.csv", index=False)
-
-    # 15) Transcript length distribution
-    t_len = transcripts[["transcript_id", "clean_text"]].copy()
-    t_len["chars"] = t_len["clean_text"].fillna("").str.len()
-    t_len["words"] = t_len["clean_text"].fillna("").str.split().map(len)
-
-    chunk_tokens = chunks.groupby("transcript_id")["n_tokens"].sum().rename("tokens_from_chunks") if not chunks.empty else pd.Series(dtype=float)
-    chunk_counts = chunks.groupby("transcript_id").size().rename("n_chunks") if not chunks.empty else pd.Series(dtype=float)
-
-    t_len = t_len.merge(chunk_tokens, on="transcript_id", how="left")
-    t_len = t_len.merge(chunk_counts, on="transcript_id", how="left")
-    t_len["tokens_from_chunks"] = t_len["tokens_from_chunks"].fillna(0)
-    t_len["n_chunks"] = t_len["n_chunks"].fillna(0)
-    t_len.to_csv(checks_dir / "transcript_length_distribution.csv", index=False)
-
-    for metric in ["chars", "words", "n_chunks", "tokens_from_chunks"]:
-        plt.figure(figsize=(8, 4))
-        plt.hist(t_len[metric], bins=40)
-        plt.title(f"Transcript Length Distribution: {metric}")
-        plt.tight_layout()
-        plt.savefig(checks_dir / f"transcript_length_{metric}.png", dpi=150)
-        plt.close()
-
-    summary = {
-        "n_transcripts": int(transcripts["transcript_id"].nunique()),
-        "n_companies": int(transcripts["company"].nunique(dropna=True)),
-        "n_segments": int(len(segments)),
-        "n_chunks": int(len(chunks)),
-        "share_transcripts_with_both_q_and_a": share_both_qa,
-        "overall_q_to_a_ratio": overall_ratio,
-        "avg_calls_per_company": avg_stats,
-    }
-    with (checks_dir / "dataset_checks_summary.json").open("w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
-
-    logger.info("Checks complete. Summary: %s", json.dumps(summary))
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run descriptive checks on cleaned earnings call outputs")
-    parser.add_argument("--output-dir", default="outputs", help="Output base directory used in preprocessing")
-    return parser.parse_args()
+        print(warn(f"{issues} issue(s) found — review above"))
+    return issues
 
 
 def main() -> None:
-    args = parse_args()
-    run_checks(Path(args.output_dir))
+    parser = argparse.ArgumentParser(description="Dataset health checks")
+    parser.add_argument(
+        "--data-dir", default="data/clean", help="Path to parquet files"
+    )
+    args = parser.parse_args()
+    issues = run_checks(Path(args.data_dir))
+    sys.exit(1 if issues else 0)
 
 
 if __name__ == "__main__":
