@@ -12,6 +12,7 @@
 #   make panel               # Step 4: build panel
 #   make regressions         # Step 5: run regressions
 #   make stats-sentiment     # Quick sentiment stats summary
+#   make stats-presentation  # Build slide-ready stats + charts
 #   make checks              # Run dataset validation
 #   make clean-analysis      # Remove analysis outputs
 #   make help                # Show all targets
@@ -93,7 +94,7 @@ checks: ## Run dataset validation checks
 #  ANALYSIS
 # ================================================================
 
-.PHONY: analysis finetune sentiment returns panel regressions stats-sentiment
+.PHONY: analysis finetune sentiment returns panel regressions stats-sentiment stats-presentation
 
 analysis: finetune sentiment returns panel regressions ## Run full analysis pipeline
 	@echo -e "$(GREEN)$(BOLD)✓ Analysis pipeline complete.$(RESET)"
@@ -146,6 +147,10 @@ regressions: $(OUTPUTS)/regression_results.txt ## Step 5: Run regressions
 stats-sentiment: ## Quick descriptive stats on sentiment outputs
 	@echo -e "$(CYAN)$(BOLD)[Stats] Sentiment output summary$(RESET)"
 	uv run python scripts/sentiment_stats.py
+
+stats-presentation: ## Build presentation stats + data visualizations
+	@echo -e "$(CYAN)$(BOLD)[Stats] Building presentation assets$(RESET)"
+	uv run python scripts/build_presentation_assets.py
 
 # ================================================================
 #  UTILITIES

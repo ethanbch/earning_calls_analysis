@@ -1,0 +1,14 @@
+metric,value
+Chunk rows,15000.0
+Transcript-level sentiment rows,11080.0
+Panel rows,7902.0
+Unique transcripts scored,8449.0
+Unique tickers in returns,2571.0
+Returns fill rate ret_1d,98.93
+Returns fill rate ret_3d,98.93
+Returns fill rate ret_5d,98.93
+Returns fill rate ret_10d,98.9
+Divergence mean,-0.1759
+Divergence median,0.0
+Divergence std,0.8028
+Divergence non-null,1505.0

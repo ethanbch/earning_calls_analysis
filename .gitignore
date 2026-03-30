@@ -19,10 +19,25 @@ logs/
 # Data artifacts (do not commit large/local datasets)
 raw/
 data/
-outputs/
 *.parquet
 *.jsonl
 *.safetensors
+
+# Analysis outputs: ignore heavy artifacts, keep shareable summaries/figures
+outputs/*
+!outputs/regression_results.txt
+!outputs/regression_results.csv
+!outputs/presentation/
+!outputs/presentation/*.png
+!outputs/presentation/*.csv
+!outputs/presentation/*.md
+
+# Always ignore large model/data artifacts under outputs
+outputs/**/*.parquet
+outputs/finbert_finetuned/
+outputs/r1000/
+outputs/r2k/
+outputs/sp/
 
 # Notebook / pipeline checkpoints
 .ipynb_checkpoints/

@@ -303,8 +303,6 @@ make checks
 Validated shape, critical nulls, token stats, section distribution,
 temporal/company coverage, ticker fill rate, and duplicates audit
 
-### Latest checks snapshot (`make checks`)
-
 **All checks passed** on all three indexes.
 
 | Index | Transcripts | Chunks | Period       |
@@ -365,6 +363,27 @@ Override hyperparameters:
 make finetune EPOCHS=5 FT_BATCH=16 LR=1e-5
 make sentiment SCORE_BATCH=64
 ```
+
+### Presentation stats & data visualizations
+
+To generate slide-ready statistics and figures from the current analysis outputs:
+
+```bash
+make stats-presentation
+```
+
+Generated files are written to `outputs/presentation/`:
+
+- `summary_kpis.csv` (key metrics for quick copy/paste in slides)
+- `speaker_role_stats.csv` (role-level sentiment summary)
+- `presentation_bullets.md` (ready-to-use narrative bullets)
+- `fig01_sentiment_label_mix.png`
+- `fig02_sentiment_score_distribution.png`
+- `fig03_role_mean_scores.png`
+- `fig04_divergence_over_time.png`
+- `fig05_divergence_vs_ret5.png`
+- `fig06_returns_boxplot_by_horizon.png`
+- `fig07_panel_corr_heatmap.png`
 
 ### Sentiment model
 
