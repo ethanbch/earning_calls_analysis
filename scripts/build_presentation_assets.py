@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -14,9 +15,9 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _save_fig(path: Path) -> None:
+def _save_fig(path: Path, dpi: int = 300) -> None:
     plt.tight_layout()
-    plt.savefig(path, dpi=180, bbox_inches="tight")
+    plt.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close()
 
 
@@ -277,6 +278,325 @@ def plot_corr_heatmap(panel: pd.DataFrame, out_path: Path) -> None:
     _save_fig(out_path)
 
 
+def plot_step3_output_funnel(panel: pd.DataFrame, out_path: Path) -> None:
+    required = {"score_exec", "score_analyst"}
+    if not required.issubset(panel.columns) or panel.empty:
+        return
+
+    ret_cols = [c for c in ["ret_1d", "ret_3d", "ret_5d", "ret_10d"] if c in panel.columns]
+
+    total = int(len(panel))
+    both_speakers_mask = panel["score_exec"].notna() & panel["score_analyst"].notna()
+    both_speakers = int(both_speakers_mask.sum())
+
+    if "divergence" in panel.columns:
+        divergence_ready = int((both_speakers_mask & panel["divergence"].notna()).sum())
+    else:
+        divergence_ready = both_speakers
+
+    if ret_cols:
+        any_ret = int((both_speakers_mask & panel[ret_cols].notna().any(axis=1)).sum())
+        ret5_ready = (
+            int((both_speakers_mask & panel["ret_5d"].notna()).sum())
+            if "ret_5d" in panel.columns
+            else any_ret
+        )
+    else:
+        any_ret = 0
+        ret5_ready = 0
+
+    labels = [
+        "Panel rows after merge",
+        "Both speaker types present",
+        "Divergence computable",
+        "With at least one return",
+        "Regression sample (ret_5d)",
+    ]
+    values = [total, both_speakers, divergence_ready, any_ret, ret5_ready]
+
+    colors = ["#DCE8F5", "#A7C4E5", "#79A6D3", "#4A86BF", "#123B6D"]
+
+    y = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(10.5, 6.2), facecolor="white")
+    bars = ax.barh(y, values, color=colors, edgecolor=colors, height=0.65)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_xlabel("Number of transcripts")
+    ax.set_title("Step 3 Output: Sample Construction and Return Coverage", fontsize=13, weight="bold")
+    ax.grid(axis="x", linestyle="--", alpha=0.35)
+    ax.set_axisbelow(True)
+
+    for i, b in enumerate(bars):
+        val = int(values[i])
+        pct = (100 * val / total) if total else 0
+        ax.text(
+            b.get_width() + max(total * 0.008, 5),
+            b.get_y() + b.get_height() / 2,
+            f"{val:,} ({pct:.1f}%)",
+            va="center",
+            ha="left",
+            fontsize=10,
+            color="#1E2A36",
+        )
+
+    note = "Exclusion driver: missing analyst turns (both speaker types required)."
+    ax.text(0.0, -0.14, note, transform=ax.transAxes, fontsize=10, color="#3B4B5A")
+
+    _save_fig(out_path, dpi=300)
+
+
+def plot_slide8_divergence_by_horizon(out_path: Path) -> None:
+    horizons = ["1-day", "3-day", "5-day"]
+    coefs = [0.0069, 0.0102, 0.0110]
+    # Already ± 1.96 * SE as requested.
+    yerr = [0.0022, 0.0025, 0.0029]
+
+    x = np.arange(len(horizons))
+    fig, ax = plt.subplots(figsize=(8, 5), facecolor="white")
+    bars = ax.bar(
+        x,
+        coefs,
+        yerr=yerr,
+        capsize=5,
+        color="#123B6D",
+        edgecolor="#123B6D",
+        width=0.62,
+    )
+
+    ax.axhline(0, color="black", linewidth=1)
+    ax.set_title("Divergence Effect by Return Horizon", fontsize=13, weight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(horizons)
+    ax.set_ylabel("Coefficient")
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    ax.set_axisbelow(True)
+
+    for i, b in enumerate(bars):
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            coefs[i] + yerr[i] + 0.00035,
+            "***",
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            fontweight="bold",
+        )
+
+    _save_fig(out_path, dpi=300)
+
+
+def plot_slide9_large_smallcap(out_path: Path) -> None:
+    labels = ["Large-cap", "Small-cap"]
+    values = [0.0053, 0.0305]
+    colors = ["#86B6E8", "#123B6D"]
+    sigs = ["*", "***"]
+
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(8, 5), facecolor="white")
+    bars = ax.bar(x, values, color=colors, edgecolor=colors, width=0.62)
+
+    ax.axhline(0, color="black", linewidth=1)
+    ax.set_title(
+        "Divergence Effect: Large-Cap vs Small-Cap (ret_5d)",
+        fontsize=13,
+        weight="bold",
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Coefficient")
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    ax.set_axisbelow(True)
+
+    for i, b in enumerate(bars):
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            values[i] + 0.0007,
+            sigs[i],
+            ha="center",
+            va="bottom",
+            fontsize=12,
+            fontweight="bold",
+        )
+
+    ax.annotate(
+        "5.7x stronger",
+        xy=(1, values[1]),
+        xytext=(0.4, values[1] + 0.008),
+        arrowprops={"arrowstyle": "->", "color": "#333333", "lw": 1.5},
+        fontsize=11,
+    )
+
+    _save_fig(out_path, dpi=300)
+
+
+def plot_slide10_pre_post(out_path: Path) -> None:
+    groups = ["Divergence coef", "SmallCap interaction"]
+    pre = [0.002, 0.0]
+    post = [0.009, 0.021]
+
+    x = np.arange(len(groups))
+    width = 0.34
+
+    fig, ax = plt.subplots(figsize=(8.6, 5), facecolor="white")
+    pre_bars = ax.bar(
+        x - width / 2,
+        pre,
+        width,
+        label="Pre-2020",
+        color="#B8BCC2",
+        edgecolor="#B8BCC2",
+    )
+    post_bars = ax.bar(
+        x + width / 2,
+        post,
+        width,
+        label="Post-2020",
+        color="#123B6D",
+        edgecolor="#123B6D",
+    )
+
+    ax.axhline(0, color="black", linewidth=1)
+    ax.set_title("Pre-2020 vs Post-2020 Effect", fontsize=13, weight="bold")
+    ax.set_xticks(x)
+    ax.set_xticklabels(groups)
+    ax.set_ylabel("Coefficient")
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False)
+
+    for b in pre_bars:
+        y = b.get_height()
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            y + 0.0006,
+            "n.s.",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color="#4A4A4A",
+        )
+
+    for b in post_bars:
+        y = b.get_height()
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            y + 0.0006,
+            "***",
+            ha="center",
+            va="bottom",
+            fontsize=11,
+            fontweight="bold",
+        )
+
+    _save_fig(out_path, dpi=300)
+
+
+def plot_slide11_lollipop(out_path: Path) -> None:
+    variables = [
+        "Divergence",
+        "Div × SmallCap",
+        "Raw exec tone",
+        "Raw analyst tone",
+    ]
+    coef = np.array([0.0035, 0.0252, 0.0002, -0.0001])
+    ci_low = np.array([0.0005, 0.0150, -0.0100, -0.0120])
+    ci_high = np.array([0.0065, 0.0354, 0.0104, 0.0118])
+    significant = [True, True, False, False]
+
+    y = np.arange(len(variables))[::-1]
+    fig, ax = plt.subplots(figsize=(9.3, 5.4), facecolor="white")
+
+    ax.axvline(0, color="black", linewidth=1)
+
+    for i in range(len(variables)):
+        yy = y[i]
+        color = "#123B6D" if significant[i] else "#B8BCC2"
+        ax.hlines(yy, ci_low[i], ci_high[i], color=color, linewidth=2)
+        ax.plot(coef[i], yy, "o", color=color, markersize=8)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(variables)
+    ax.set_xlabel("Coefficient")
+    ax.set_title(
+        "Model 3: Which Variables Are Significant?", fontsize=13, weight="bold"
+    )
+    ax.grid(axis="x", linestyle="--", alpha=0.35)
+    ax.set_axisbelow(True)
+
+    _save_fig(out_path, dpi=300)
+
+
+def plot_slide12_regression_table(out_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(13, 6.8), facecolor="white")
+    ax.set_axis_off()
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    ax.text(
+        0.01,
+        0.96,
+        "Panel Regression Results",
+        fontsize=16,
+        fontweight="bold",
+        ha="left",
+        va="top",
+    )
+
+    x_cols = {
+        "model": 0.02,
+        "var": 0.22,
+        "ret1": 0.50,
+        "ret3": 0.68,
+        "ret5": 0.86,
+    }
+
+    # Booktabs-like horizontal rules
+    ax.hlines(0.90, 0.01, 0.99, colors="black", linewidth=1.6)
+    ax.hlines(0.84, 0.01, 0.99, colors="black", linewidth=0.9)
+
+    ax.text(x_cols["model"], 0.865, "Model", fontsize=11, fontweight="bold")
+    ax.text(x_cols["var"], 0.865, "Variable", fontsize=11, fontweight="bold")
+    ax.text(x_cols["ret1"], 0.865, "ret_1d", fontsize=11, fontweight="bold", ha="right")
+    ax.text(x_cols["ret3"], 0.865, "ret_3d", fontsize=11, fontweight="bold", ha="right")
+    ax.text(x_cols["ret5"], 0.865, "ret_5d", fontsize=11, fontweight="bold", ha="right")
+
+    rows = [
+        ("Baseline", "divergence", "0.0069***", "0.0102***", "0.0110***"),
+        ("", "SE", "(0.0022)", "(0.0025)", "(0.0029)"),
+        ("", "N", "1492", "1492", "1492"),
+        ("", "R²", "0.031", "0.032", "0.053"),
+        ("Size", "divergence", "0.0046*", "0.0064*", "0.0053*"),
+        ("", "div×SmallCap", "0.0106***", "0.0169***", "0.0252***"),
+        ("", "R²", "0.034", "0.037", "0.062"),
+        ("Full", "divergence", "0.0032*", "0.0043*", "0.0035*"),
+        ("", "div×SmallCap", "0.0109***", "0.0171***", "0.0252***"),
+        ("", "R²", "0.035", "0.037", "0.062"),
+    ]
+
+    y = 0.80
+    row_h = 0.055
+    for i, row in enumerate(rows):
+        model, var, c1, c3, c5 = row
+        if i in {4, 7}:
+            ax.hlines(y + 0.02, 0.01, 0.99, colors="#555555", linewidth=0.5)
+
+        ax.text(x_cols["model"], y, model, fontsize=10.5, ha="left", va="center")
+        ax.text(x_cols["var"], y, var, fontsize=10.5, ha="left", va="center")
+        ax.text(x_cols["ret1"], y, c1, fontsize=10.5, ha="right", va="center")
+        ax.text(x_cols["ret3"], y, c3, fontsize=10.5, ha="right", va="center")
+        ax.text(x_cols["ret5"], y, c5, fontsize=10.5, ha="right", va="center")
+        y -= row_h
+
+    ax.hlines(y + 0.022, 0.01, 0.99, colors="black", linewidth=1.2)
+
+    footnote = "HC1 robust SE. Quarter FE included. ***p<0.01, **p<0.05, *p<0.10"
+    ax.text(0.01, y - 0.03, footnote, fontsize=10, color="#333333", ha="left", va="top")
+
+    _save_fig(out_path, dpi=300)
+
+
 def load_regression_csv(path: Path) -> pd.DataFrame | None:
     if not path.exists():
         return None
@@ -330,6 +650,16 @@ def main() -> None:
     plot_divergence_vs_ret5(panel, out_dir / "fig05_divergence_vs_ret5.png")
     plot_return_horizon_boxplot(panel, out_dir / "fig06_returns_boxplot_by_horizon.png")
     plot_corr_heatmap(panel, out_dir / "fig07_panel_corr_heatmap.png")
+    plot_step3_output_funnel(panel, out_dir / "fig08_step3_output_funnel.png")
+
+    # Slide-specific visuals requested for final presentation.
+    plot_slide8_divergence_by_horizon(
+        out_dir / "slide08_divergence_effect_by_return_horizon.png"
+    )
+    plot_slide9_large_smallcap(out_dir / "slide09_largecap_vs_smallcap_ret5d.png")
+    plot_slide10_pre_post(out_dir / "slide10_pre2020_vs_post2020_effect.png")
+    plot_slide11_lollipop(out_dir / "slide11_model3_significance_lollipop.png")
+    plot_slide12_regression_table(out_dir / "slide12_panel_regression_table.png")
 
     write_presentation_notes(out_dir / "presentation_bullets.md", bullets)
 
@@ -337,7 +667,8 @@ def main() -> None:
     print("- summary_kpis.csv")
     print("- speaker_role_stats.csv (if role columns present)")
     print("- presentation_bullets.md")
-    print("- fig01..fig07 PNG charts")
+    print("- fig01..fig08 PNG charts")
+    print("- slide08..slide12 PNG charts/tables")
 
 
 if __name__ == "__main__":
