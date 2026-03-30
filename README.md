@@ -15,7 +15,7 @@ raw/
   rawrussel2K/                             # R2K Parquet directory (~32 K transcripts)
   sp/                                      # S&P 500 Parquet directory (~34 K transcripts)
 src/
-  pipeline/                       # Modular preprocessing pipeline
+  preprocessing/                  # Modular preprocessing pipeline
     loader.py                     #   Streaming reader: JSONL + Parquet, schema inference
     cleaner.py                    #   Scraping-artifact removal
     metadata.py                   #   Ticker / date / company extraction
@@ -210,7 +210,7 @@ in the R1000 map (S&P 500 is a strict subset of R1000 by construction).
 
 ### Where the mapping lives
 
-The mapping is stored at `src/pipeline/company_ticker_map.json`. It is loaded once
+The mapping is stored at `src/preprocessing/company_ticker_map.json`. It is loaded once
 at import time by `metadata.py`. The lookup order is:
 
 1. Parenthesised ticker in the transcript header, e.g. `(AAPL)`

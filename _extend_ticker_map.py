@@ -20,7 +20,7 @@ import yfinance as yf
 from tqdm import tqdm
 
 US_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS", "OPR"}
-MAP_PATH = Path("src/pipeline/company_ticker_map.json")
+MAP_PATH = Path("src/preprocessing/company_ticker_map.json")
 
 SOURCES = {
     "R2K": Path("raw/rawrussel2K"),

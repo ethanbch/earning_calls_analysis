@@ -35,7 +35,7 @@ def search_ticker(company: str) -> str | None:
 
 def main():
     companies_file = Path("_companies.txt")
-    output_file = Path("src/pipeline/company_ticker_map.json")
+    output_file = Path("src/preprocessing/company_ticker_map.json")
 
     companies = []
     with open(companies_file) as f:
