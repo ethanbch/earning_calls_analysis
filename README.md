@@ -1,10 +1,24 @@
 # Earnings Call Sentiment Analysis
 
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![FinBERT](https://img.shields.io/badge/Model-FinBERT-blue)
+
 Sentiment analysis on ~115 000 earnings-call transcripts (2006–2026) covering
 Russell 1000, Russell 2000, and the S&P 500.
 The preprocessing pipeline produces clean, FinBERT-ready text chunks and structured
 metadata for panel regressions studying executive-vs-analyst sentiment divergence
 and post-announcement stock returns.
+
+## Visual results
+
+![Figure 5 - Executive-analyst divergence vs 5-day return](outputs/presentation/fig05_divergence_vs_ret5.png)
+_Figure 5 - Executive-analyst sentiment divergence vs. 5-day post-announcement returns._
+
+![Figure 3 - Mean sentiment score by speaker role](outputs/presentation/fig03_role_mean_scores.png)
+_Figure 3 - Mean sentiment score by speaker role (executive vs analyst vs operator)._
+
+![Figure 4 - Divergence over time](outputs/presentation/fig04_divergence_over_time.png)
+_Figure 4 - Sentiment divergence trend over time (2006-2026)._
 
 ## Project structure
 
