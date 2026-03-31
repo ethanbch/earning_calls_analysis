@@ -31,9 +31,9 @@ outputs/*
 !outputs/presentation/*.png
 !outputs/presentation/*.csv
 !outputs/presentation/*.md
-
 # Always ignore large model/data artifacts under outputs
 outputs/**/*.parquet
+!outputs/sentiment_scores.parquet
 outputs/finbert_finetuned/
 outputs/r1000/
 outputs/r2k/
